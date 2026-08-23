@@ -85,15 +85,47 @@ def main() -> None:
 
     import runner
 
-    resultado = runner.rodar(
-        serpapi_key=serpapi_key,
-        gmail_user=gmail_user,
-        gmail_app_password=gmail_app_password,
-        email_destino=email_destino,
-        dry_run=args.dry_run,
-        db_path=ROOT / "data" / "tracker.db",
-    )
-    print(json.dumps(resultado, indent=2, ensure_ascii=False, default=str))
+    try:
+        resultado = runner.rodar(
+            serpapi_key=serpapi_key,
+            gmail_user=gmail_user,
+            gmail_app_password=gmail_app_password,
+            email_destino=email_destino,
+            dry_run=args.dry_run,
+            db_path=ROOT / "data" / "tracker.db",
+        )
+        print(json.dumps(resultado, indent=2, ensure_ascii=False, default=str))
+    except Exception:
+        # Rede de segurança: o modo de morte deste projeto é falha
+        # silenciosa (parser quebra, script para, ninguém percebe). Se
+        # chegou até aqui é bug não previsto no runner — tenta avisar por
+        # e-mail mesmo assim antes de sair com erro.
+        import traceback
+
+        erro_completo = traceback.format_exc()
+        print(erro_completo, file=sys.stderr)
+
+        if not args.dry_run and gmail_user and gmail_app_password and email_destino:
+            try:
+                import emailer
+
+                agora = datetime.now(timezone.utc)
+                hora_local = agora.astimezone(emailer.FUSO_EXIBICAO).strftime("%H:%M")
+                ctx = emailer.FalhaContext(
+                    origem="NAT", destino="BHZ", rodada_hora_local=hora_local,
+                    erro=f"Crash não tratado no main.py:\n\n{erro_completo[-3000:]}",
+                    ts_utc=agora,
+                )
+                assunto, html = emailer.render_falha(ctx)
+                emailer.send_email(
+                    gmail_user=gmail_user, gmail_app_password=gmail_app_password,
+                    destino=email_destino, assunto=assunto, html=html,
+                )
+                print("E-mail de falha (crash) enviado.", file=sys.stderr)
+            except Exception as erro_email:
+                print(f"Também falhou ao mandar e-mail de falha: {erro_email}", file=sys.stderr)
+
+        sys.exit(1)
 
 
 if __name__ == "__main__":

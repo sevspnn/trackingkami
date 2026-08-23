@@ -1,0 +1,61 @@
+name: Rastreador NAT>BHZ
+
+on:
+  schedule:
+    - cron: '17 10 * * *'  # 07:17 America/Fortaleza — rodada de rotina (sempre manda e-mail)
+    - cron: '17 16 * * *'  # 13:17
+    - cron: '17 22 * * *'  # 19:17
+    - cron: '17 4 * * *'   # 01:17
+  workflow_dispatch:  # pra rodar manualmente durante a fase de validação
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rastreador-nat-bhz
+  cancel-in-progress: false
+
+jobs:
+  rodada:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40  # cobre até 20min de jitter + consultas + retries
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Jitter (0-20min, só em rodadas agendadas)
+        if: github.event_name == 'schedule'
+        run: |
+          SEGUNDOS=$(( RANDOM % 1200 ))
+          echo "Aguardando ${SEGUNDOS}s de jitter antes de começar..."
+          sleep "$SEGUNDOS"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Rodar rastreador
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: python main.py
+
+      - name: Commitar banco de volta pro repositório
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/tracker.db
+          if git diff --cached --quiet; then
+            echo "Nada novo no banco nesta rodada, pulando commit."
+          else
+            HORA_LOCAL=$(TZ='America/Fortaleza' date '+%Y-%m-%d %H:%M')
+            git commit -m "dados: rodada ${HORA_LOCAL}"
+            git push
+          fi
