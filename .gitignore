@@ -3,5 +3,4 @@ __pycache__/
 *.pyc
 .env
 data/test.db
-data/tracker.db
 preview_*.html

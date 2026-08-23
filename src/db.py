@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS consultas (
@@ -49,6 +50,16 @@ CREATE TABLE IF NOT EXISTS historico_google (
     ts_utc TEXT NOT NULL UNIQUE,
     preco_centavos INTEGER NOT NULL,
     importado_em TEXT NOT NULL
+);
+
+-- Não fazia parte do schema original do prompt: necessária pra anti-spam
+-- ('no máximo 1 alerta imediato a cada 4h') sobreviver entre execuções,
+-- já que cada rodada do GitHub Actions roda num container novo sem
+-- memória do processo anterior.
+CREATE TABLE IF NOT EXISTS notificacoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    tipo TEXT NOT NULL  -- 'rotina' | 'novo_minimo' | 'queda_significativa' | 'falha'
 );
 
 CREATE INDEX IF NOT EXISTS idx_consultas_ts ON consultas(ts_utc);
@@ -108,6 +119,20 @@ def insert_oferta(conn: sqlite3.Connection, consulta_id: int, row: dict) -> int:
         payload,
     )
     return cur.lastrowid
+
+
+def insert_notificacao(conn: sqlite3.Connection, ts_utc: str, tipo: str) -> None:
+    conn.execute("INSERT INTO notificacoes (ts_utc, tipo) VALUES (?, ?)", (ts_utc, tipo))
+
+
+def ultima_notificacao_imediata(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT ts_utc, tipo FROM notificacoes
+        WHERE tipo IN ('novo_minimo', 'queda_significativa')
+        ORDER BY ts_utc DESC LIMIT 1
+        """
+    ).fetchone()
 
 
 def insert_historico_google(conn: sqlite3.Connection, ts_utc: str, preco_centavos: int, importado_em: str) -> None:

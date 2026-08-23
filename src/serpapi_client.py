@@ -46,7 +46,7 @@ def _reais_para_centavos(v: Optional[float]) -> Optional[int]:
     return round(v * 100) if v is not None else None
 
 
-def buscar_price_insights(
+def buscar_raw(
     *,
     api_key: str,
     origem: str,
@@ -55,10 +55,9 @@ def buscar_price_insights(
     destino: str = AEROPORTO_DESTINO_ANCORA,
     currency: str = "BRL",
     timeout: int = 30,
-) -> PriceInsights:
-    """Levanta SerpApiError em qualquer falha (rede, chave inválida, sem
-    resultado) — quem chama decide se isso derruba a rodada ou só pula a
-    recalibração."""
+) -> dict:
+    """Chamada de baixo nível — devolve o JSON cru. Levanta SerpApiError em
+    qualquer falha (rede, chave inválida, sem resultado)."""
     params = {
         "engine": "google_flights",
         "departure_id": origem,
@@ -86,6 +85,29 @@ def buscar_price_insights(
 
     if "error" in data:
         raise SerpApiError(f"SerpApi retornou erro: {data['error']}")
+
+    return data
+
+
+def buscar_price_insights(
+    *,
+    api_key: str,
+    origem: str,
+    data_ida: str,
+    data_volta: Optional[str] = None,
+    destino: str = AEROPORTO_DESTINO_ANCORA,
+    currency: str = "BRL",
+    timeout: int = 30,
+) -> PriceInsights:
+    data = buscar_raw(
+        api_key=api_key,
+        origem=origem,
+        data_ida=data_ida,
+        data_volta=data_volta,
+        destino=destino,
+        currency=currency,
+        timeout=timeout,
+    )
 
     pi = data.get("price_insights")
     if not pi:
