@@ -77,6 +77,17 @@ def _pode_enviar_imediato(conn, agora_utc: datetime) -> bool:
     return (agora_utc - ts_ultima) >= timedelta(hours=config.ANTI_SPAM_HORAS)
 
 
+def _ja_enviou_rotina_hoje(conn, hora_local: datetime) -> bool:
+    """Evita duplicar o e-mail de rotina se, por atraso do agendador do
+    Actions ou uma rodada manual de teste, duas execuções caírem no mesmo
+    dia local (ver validação manual de 24/08/2026 — aconteceu de verdade)."""
+    hoje = hora_local.date()
+    rows = conn.execute(
+        "SELECT ts_utc FROM notificacoes WHERE tipo = 'rotina' ORDER BY ts_utc DESC LIMIT 5"
+    ).fetchall()
+    return any(datetime.fromisoformat(r["ts_utc"]).astimezone(emailer.FUSO_EXIBICAO).date() == hoje for r in rows)
+
+
 def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_password: Optional[str],
           email_destino: Optional[str], dry_run: bool, db_path: Path,
           forcar_rotina: Optional[bool] = None) -> dict:
@@ -218,7 +229,12 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
     log["tipo_email"] = tipo_email
 
     if tipo_email and not dry_run and gmail_user and gmail_app_password and email_destino:
-        pode_imediato = tipo_email in ("rotina", "falha") or _pode_enviar_imediato(conn, agora_utc)
+        if tipo_email == "rotina":
+            pode_imediato = not _ja_enviou_rotina_hoje(conn, hora_local)
+        elif tipo_email == "falha":
+            pode_imediato = True
+        else:
+            pode_imediato = _pode_enviar_imediato(conn, agora_utc)
         if pode_imediato:
             if tipo_email == "falha":
                 assunto, html = emailer.render_falha(ctx_falha)
