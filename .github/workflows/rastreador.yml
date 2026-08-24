@@ -44,6 +44,10 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          # Diz pro main.py se essa é a rodada de rotina (07:17) direto pelo
+          # cron que disparou — não pela hora local depois do jitter, que o
+          # agendador do Actions atrasa com frequência (ver runner.rodar).
+          RODADA_ROTINA: ${{ github.event.schedule == '17 10 * * *' }}
         run: python main.py
 
       - name: Commitar banco de volta pro repositório

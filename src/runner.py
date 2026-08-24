@@ -78,7 +78,15 @@ def _pode_enviar_imediato(conn, agora_utc: datetime) -> bool:
 
 
 def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_password: Optional[str],
-          email_destino: Optional[str], dry_run: bool, db_path: Path) -> dict:
+          email_destino: Optional[str], dry_run: bool, db_path: Path,
+          forcar_rotina: Optional[bool] = None) -> dict:
+    """forcar_rotina: quando o chamador já sabe (pelo cron que disparou a
+    execução) se essa é a rodada de rotina, passa True/False aqui em vez de
+    deixar a gente inferir pela hora local — o agendador do GitHub Actions
+    atrasa o disparo do cron com frequência (às vezes 20-40+ min, some com
+    o jitter de propósito e pode empurrar a execução pra fora da hora
+    'certa'), então inferir por `datetime.now().hour` depois do jitter é
+    frágil. None (rodada manual/teste local) cai de volta nessa inferência."""
     agora_utc = datetime.now(timezone.utc)
     hora_local = agora_utc.astimezone(emailer.FUSO_EXIBICAO)
     log = {"ts_utc": agora_utc.isoformat(), "dry_run": dry_run, "consultas": {}, "email_enviado": None}
@@ -145,7 +153,7 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
 
         novo_minimo = metrics.eh_novo_minimo(preco_atual, serie_antes)
         queda = metrics.eh_queda_significativa(preco_atual, serie_antes, agora_utc)
-        eh_rotina = hora_local.hour == config.EMAIL_ROTINA_HORA_LOCAL
+        eh_rotina = forcar_rotina if forcar_rotina is not None else hora_local.hour == config.EMAIL_ROTINA_HORA_LOCAL
 
         if novo_minimo:
             tipo_email = "novo_minimo"

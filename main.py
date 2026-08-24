@@ -85,6 +85,9 @@ def main() -> None:
 
     import runner
 
+    rodada_rotina_env = os.environ.get("RODADA_ROTINA")
+    forcar_rotina = {"true": True, "false": False}.get((rodada_rotina_env or "").lower())
+
     try:
         resultado = runner.rodar(
             serpapi_key=serpapi_key,
@@ -93,6 +96,7 @@ def main() -> None:
             email_destino=email_destino,
             dry_run=args.dry_run,
             db_path=ROOT / "data" / "tracker.db",
+            forcar_rotina=forcar_rotina,
         )
         print(json.dumps(resultado, indent=2, ensure_ascii=False, default=str))
     except Exception:
