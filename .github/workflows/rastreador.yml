@@ -7,6 +7,11 @@ on:
     - cron: '17 22 * * *'  # 19:17
     - cron: '17 4 * * *'   # 01:17
   workflow_dispatch:  # pra rodar manualmente durante a fase de validação
+    inputs:
+      forcar_rotina:
+        description: 'Tratar essa execução manual como a rodada de rotina (envia o e-mail diário mesmo fora das 07:17, ex. pra repor uma rodada perdida)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -47,7 +52,7 @@ jobs:
           # Diz pro main.py se essa é a rodada de rotina (07:17) direto pelo
           # cron que disparou — não pela hora local depois do jitter, que o
           # agendador do Actions atrasa com frequência (ver runner.rodar).
-          RODADA_ROTINA: ${{ github.event.schedule == '17 10 * * *' }}
+          RODADA_ROTINA: ${{ github.event.schedule == '17 10 * * *' || inputs.forcar_rotina == true }}
         run: python main.py
 
       - name: Commitar banco de volta pro repositório
