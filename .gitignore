@@ -4,3 +4,4 @@ __pycache__/
 .env
 data/test.db
 preview_*.html
+.claude/
