@@ -100,7 +100,7 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
     frágil. None (rodada manual/teste local) cai de volta nessa inferência."""
     agora_utc = datetime.now(timezone.utc)
     hora_local = agora_utc.astimezone(emailer.FUSO_EXIBICAO)
-    log = {"ts_utc": agora_utc.isoformat(), "dry_run": dry_run, "consultas": {}, "email_enviado": None}
+    log = {"ts_utc": agora_utc.isoformat(), "dry_run": dry_run, "consultas": {}}
 
     conn = None if dry_run else db.connect(db_path)
     if conn is not None:
@@ -143,12 +143,12 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
             _sleep_jitter()
 
     resultado_primario = resultados[TIPO_PRIMARIO]
-    tipo_email: Optional[str] = None
+    tipos_email: list[str] = []
     ctx_falha: Optional[emailer.FalhaContext] = None
     ctx_rodada: Optional[emailer.RodadaContext] = None
 
     if not resultado_primario["ok"]:
-        tipo_email = "falha"
+        tipos_email = ["falha"]
         ctx_falha = emailer.FalhaContext(
             origem=config.ORIGEM,
             destino=config.DESTINO,
@@ -166,14 +166,19 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
         queda = metrics.eh_queda_significativa(preco_atual, serie_antes, agora_utc)
         eh_rotina = forcar_rotina if forcar_rotina is not None else hora_local.hour == config.EMAIL_ROTINA_HORA_LOCAL
 
+        # Rotina e alerta imediato são políticas independentes (ver spec):
+        # se a rodada das 07:17 também for um novo mínimo/queda, manda os
+        # dois — um não deve engolir o outro (bug real observado em
+        # 25-27/08/2026: dias com queda de preço silenciosamente perderam
+        # o e-mail de rotina porque isso era um elif).
         if novo_minimo:
-            tipo_email = "novo_minimo"
+            tipos_email.append("novo_minimo")
         elif queda:
-            tipo_email = "queda_significativa"
-        elif eh_rotina:
-            tipo_email = "rotina"
+            tipos_email.append("queda_significativa")
+        if eh_rotina:
+            tipos_email.append("rotina")
 
-        if tipo_email is not None:
+        if tipos_email:
             serie_exibicao = serie_antes + [metrics.PricePoint(ts_utc=agora_utc, preco_centavos=preco_atual)]
             mediana = metrics.mediana_movel_14d(serie_exibicao, agora_utc)
             minimo = metrics.minimo_historico(serie_exibicao)
@@ -226,34 +231,38 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
                 variante_flexivel=variante,
             )
 
-    log["tipo_email"] = tipo_email
+    log["tipos_email"] = tipos_email
+    log["emails_enviados"] = []
 
-    if tipo_email and not dry_run and gmail_user and gmail_app_password and email_destino:
-        if tipo_email == "rotina":
-            pode_imediato = not _ja_enviou_rotina_hoje(conn, hora_local)
-        elif tipo_email == "falha":
-            pode_imediato = True
-        else:
-            pode_imediato = _pode_enviar_imediato(conn, agora_utc)
-        if pode_imediato:
-            if tipo_email == "falha":
+    if tipos_email and not dry_run and gmail_user and gmail_app_password and email_destino:
+        for tipo in tipos_email:
+            if tipo == "rotina":
+                pode_enviar = not _ja_enviou_rotina_hoje(conn, hora_local)
+            elif tipo == "falha":
+                pode_enviar = True
+            else:
+                pode_enviar = _pode_enviar_imediato(conn, agora_utc)
+
+            if not pode_enviar:
+                log["emails_enviados"].append(f"suprimido por anti-spam (tipo={tipo})")
+                continue
+
+            if tipo == "falha":
                 assunto, html = emailer.render_falha(ctx_falha)
-            elif tipo_email == "rotina":
+            elif tipo == "rotina":
                 assunto, html = emailer.render_rotina(ctx_rodada)
             else:
-                assunto, html = emailer.render_alerta(ctx_rodada, motivo=tipo_email)
+                assunto, html = emailer.render_alerta(ctx_rodada, motivo=tipo)
 
             emailer.send_email(
                 gmail_user=gmail_user, gmail_app_password=gmail_app_password,
                 destino=email_destino, assunto=assunto, html=html,
             )
-            db.insert_notificacao(conn, agora_utc.isoformat(), tipo_email)
+            db.insert_notificacao(conn, agora_utc.isoformat(), tipo)
             conn.commit()
-            log["email_enviado"] = assunto
-        else:
-            log["email_enviado"] = f"suprimido por anti-spam (tipo={tipo_email})"
-    elif tipo_email and dry_run:
-        log["email_enviado"] = f"(dry-run) enviaria: tipo={tipo_email}"
+            log["emails_enviados"].append(assunto)
+    elif tipos_email and dry_run:
+        log["emails_enviados"] = [f"(dry-run) enviaria: tipo={t}" for t in tipos_email]
 
     if conn is not None:
         conn.close()
