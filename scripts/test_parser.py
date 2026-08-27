@@ -45,6 +45,7 @@ def main():
     )
 
     consulta_row = {
+        "rota": "teste_manual",
         "ts_utc": datetime.now(timezone.utc).isoformat(),
         "tipo": "round_trip_1012",
         "origem": "NAT",

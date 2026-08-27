@@ -1,13 +1,14 @@
-"""Orquestra uma rodada completa: roda as 5 consultas, grava no banco,
-calcula as métricas e decide se/qual e-mail mandar.
+"""Orquestra uma rodada completa pra UMA rota: roda as consultas, grava no
+banco, calcula as métricas e decide se/qual e-mail mandar. `main.py` chama
+isso uma vez por rota ativa em `config.ROTAS`.
 
 Decisão de design que vale registrar (não estava 100% explícita no spec):
 mediana/mínimo/média que aparecem no e-mail e disparam os alertas são
-sempre calculados sobre a série `mais_barato_da_rodada` (round_trip_1012),
+sempre calculados sobre a série `mais_barato_da_rodada` (round_trip_principal),
 porque é ela que corresponde ao preço mostrado ("o que você veria se
 comprasse agora"). `itinerario_referencia` é uma série adicional, calculada
-e disponível via queries.py assim que ITINERARIO_REFERENCIA for fixado,
-mas hoje só é exibida como linha extra no e-mail — não gate alerta.
+e disponível via queries.py assim que rota.itinerario_referencia for
+fixado, mas hoje só é exibida como linha extra no e-mail — não gate alerta.
 """
 
 from __future__ import annotations
@@ -25,8 +26,9 @@ import emailer
 import fast_flights_client as ffc
 import metrics
 import queries as queries_mod
+from config import RotaConfig
 
-TIPO_PRIMARIO = "round_trip_1012"
+TIPO_PRIMARIO = "round_trip_principal"
 
 
 def _sleep_jitter() -> None:
@@ -57,39 +59,43 @@ def _perna_de_oferta(oferta) -> Optional[emailer.PernaVoo]:
     )
 
 
-def _serie_historica(db_path: Path, tipo: str, *, conn=None) -> list[metrics.PricePoint]:
+def _serie_historica(db_path: Path, rota_id: str, tipo: str, *, conn=None) -> list[metrics.PricePoint]:
     if conn is not None:
-        return queries_mod.serie_mais_barato_da_rodada(conn, tipo)
+        return queries_mod.serie_mais_barato_da_rodada(conn, rota_id, tipo)
     if not os.path.exists(db_path):
         return []
     conn_leitura = db.connect(db_path)
     try:
-        return queries_mod.serie_mais_barato_da_rodada(conn_leitura, tipo)
+        # Não chama db.init_db aqui de propósito: --dry-run não pode
+        # escrever nada no arquivo, nem migração de schema. O banco real
+        # é migrado pela primeira rodada não-dry-run (ou manualmente).
+        return queries_mod.serie_mais_barato_da_rodada(conn_leitura, rota_id, tipo)
     finally:
         conn_leitura.close()
 
 
-def _pode_enviar_imediato(conn, agora_utc: datetime) -> bool:
-    ultima = db.ultima_notificacao_imediata(conn)
+def _pode_enviar_imediato(conn, rota_id: str, agora_utc: datetime) -> bool:
+    ultima = db.ultima_notificacao_imediata(conn, rota_id)
     if not ultima:
         return True
     ts_ultima = datetime.fromisoformat(ultima["ts_utc"])
     return (agora_utc - ts_ultima) >= timedelta(hours=config.ANTI_SPAM_HORAS)
 
 
-def _ja_enviou_rotina_hoje(conn, hora_local: datetime) -> bool:
+def _ja_enviou_rotina_hoje(conn, rota_id: str, hora_local: datetime) -> bool:
     """Evita duplicar o e-mail de rotina se, por atraso do agendador do
     Actions ou uma rodada manual de teste, duas execuções caírem no mesmo
     dia local (ver validação manual de 24/08/2026 — aconteceu de verdade)."""
     hoje = hora_local.date()
     rows = conn.execute(
-        "SELECT ts_utc FROM notificacoes WHERE tipo = 'rotina' ORDER BY ts_utc DESC LIMIT 5"
+        "SELECT ts_utc FROM notificacoes WHERE rota = ? AND tipo = 'rotina' ORDER BY ts_utc DESC LIMIT 5",
+        (rota_id,),
     ).fetchall()
     return any(datetime.fromisoformat(r["ts_utc"]).astimezone(emailer.FUSO_EXIBICAO).date() == hoje for r in rows)
 
 
-def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_password: Optional[str],
-          email_destino: Optional[str], dry_run: bool, db_path: Path,
+def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[str],
+          gmail_app_password: Optional[str], email_destino: Optional[str], dry_run: bool, db_path: Path,
           forcar_rotina: Optional[bool] = None) -> dict:
     """forcar_rotina: quando o chamador já sabe (pelo cron que disparou a
     execução) se essa é a rodada de rotina, passa True/False aqui em vez de
@@ -100,13 +106,13 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
     frágil. None (rodada manual/teste local) cai de volta nessa inferência."""
     agora_utc = datetime.now(timezone.utc)
     hora_local = agora_utc.astimezone(emailer.FUSO_EXIBICAO)
-    log = {"ts_utc": agora_utc.isoformat(), "dry_run": dry_run, "consultas": {}}
+    log = {"rota": rota.id, "ts_utc": agora_utc.isoformat(), "dry_run": dry_run, "consultas": {}}
 
     conn = None if dry_run else db.connect(db_path)
     if conn is not None:
         db.init_db(conn)
 
-    queries = ffc.construir_queries()
+    queries = ffc.construir_queries(rota)
     resultados = {}
 
     for i, spec in enumerate(queries):
@@ -121,10 +127,11 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
 
         if conn is not None:
             consulta_row = {
+                "rota": rota.id,
                 "ts_utc": agora_utc.isoformat(),
                 "tipo": spec["tipo"],
-                "origem": config.ORIGEM,
-                "destino": config.DESTINO,
+                "origem": rota.origem,
+                "destino": rota.destino,
                 "data_ida": spec["data_ida"],
                 "data_volta": spec["data_volta"],
                 "ok": 1 if resultado["ok"] else 0,
@@ -150,15 +157,15 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
     if not resultado_primario["ok"]:
         tipos_email = ["falha"]
         ctx_falha = emailer.FalhaContext(
-            origem=config.ORIGEM,
-            destino=config.DESTINO,
+            origem=rota.origem,
+            destino=rota.destino,
             rodada_hora_local=hora_local.strftime("%H:%M"),
             erro=resultado_primario["erro"] or "erro desconhecido",
             ts_utc=agora_utc,
         )
     else:
         preco_atual = _preco_min(resultado_primario)
-        serie_antes = _serie_historica(db_path, TIPO_PRIMARIO, conn=conn)
+        serie_antes = _serie_historica(db_path, rota.id, TIPO_PRIMARIO, conn=conn)
         if conn is not None and serie_antes:
             serie_antes = serie_antes[:-1]  # exclui a rodada que acabamos de inserir
 
@@ -186,7 +193,7 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
             pct = metrics.variacao_pct(preco_atual, mediana) if len(serie_antes) >= metrics.MIN_AMOSTRAS_PARA_PORCENTAGEM else None
 
             preco_ida = _preco_min(resultados["one_way_ida"])
-            preco_volta = _preco_min(resultados["one_way_volta_1012"])
+            preco_volta = _preco_min(resultados["one_way_volta_principal"])
             comparacao_ow = None
             if preco_ida is not None and preco_volta is not None:
                 comp = metrics.comparar_oneways_vs_roundtrip(preco_ida, preco_volta, preco_atual)
@@ -198,26 +205,26 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
                 )
 
             variante = None
-            if config.VARIANTE_FLEXIVEL_ATIVA and resultados.get("round_trip_1013", {}).get("ok"):
-                preco_1013 = _preco_min(resultados["round_trip_1013"])
-                serie_1013 = _serie_historica(db_path, "round_trip_1013", conn=conn)
-                pct_1013 = None
-                if len(serie_1013) >= metrics.MIN_AMOSTRAS_PARA_PORCENTAGEM:
-                    med_1013 = metrics.mediana_movel_14d(serie_1013, agora_utc)
-                    pct_1013 = metrics.variacao_pct(preco_1013, med_1013)
+            if rota.variante_flexivel_ativa and resultados.get("round_trip_flexivel", {}).get("ok"):
+                preco_flex = _preco_min(resultados["round_trip_flexivel"])
+                serie_flex = _serie_historica(db_path, rota.id, "round_trip_flexivel", conn=conn)
+                pct_flex = None
+                if len(serie_flex) >= metrics.MIN_AMOSTRAS_PARA_PORCENTAGEM:
+                    med_flex = metrics.mediana_movel_14d(serie_flex, agora_utc)
+                    pct_flex = metrics.variacao_pct(preco_flex, med_flex)
                 variante = emailer.VarianteFlexivel(
-                    data_volta=config.DATA_VOLTA_FLEXIVEL,
-                    preco_centavos=preco_1013,
-                    pct_mediana=pct_1013,
-                    n_amostras=len(serie_1013),
-                    perna_volta=_perna_de_oferta(_oferta_mais_barata(resultados.get("one_way_volta_1013", {"ok": False, "ofertas": []}))),
+                    data_volta=rota.data_volta_flexivel,
+                    preco_centavos=preco_flex,
+                    pct_mediana=pct_flex,
+                    n_amostras=len(serie_flex),
+                    perna_volta=_perna_de_oferta(_oferta_mais_barata(resultados.get("one_way_volta_flexivel", {"ok": False, "ofertas": []}))),
                 )
 
             ctx_rodada = emailer.RodadaContext(
-                origem=config.ORIGEM,
-                destino=config.DESTINO,
-                data_ida=config.DATA_IDA,
-                data_volta=config.DATA_VOLTA,
+                origem=rota.origem,
+                destino=rota.destino,
+                data_ida=rota.data_ida,
+                data_volta=rota.data_volta,
                 preco_centavos=preco_atual,
                 n_amostras=n,
                 pct_mediana=pct,
@@ -226,7 +233,7 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
                 media_centavos=media,
                 google_price_level=resultado_primario["google_price_level"],
                 perna_ida=_perna_de_oferta(_oferta_mais_barata(resultado_primario)),
-                perna_volta=_perna_de_oferta(_oferta_mais_barata(resultados["one_way_volta_1012"])),
+                perna_volta=_perna_de_oferta(_oferta_mais_barata(resultados["one_way_volta_principal"])),
                 comparacao_ow=comparacao_ow,
                 variante_flexivel=variante,
             )
@@ -237,11 +244,11 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
     if tipos_email and not dry_run and gmail_user and gmail_app_password and email_destino:
         for tipo in tipos_email:
             if tipo == "rotina":
-                pode_enviar = not _ja_enviou_rotina_hoje(conn, hora_local)
+                pode_enviar = not _ja_enviou_rotina_hoje(conn, rota.id, hora_local)
             elif tipo == "falha":
                 pode_enviar = True
             else:
-                pode_enviar = _pode_enviar_imediato(conn, agora_utc)
+                pode_enviar = _pode_enviar_imediato(conn, rota.id, agora_utc)
 
             if not pode_enviar:
                 log["emails_enviados"].append(f"suprimido por anti-spam (tipo={tipo})")
@@ -258,7 +265,7 @@ def rodar(*, serpapi_key: Optional[str], gmail_user: Optional[str], gmail_app_pa
                 gmail_user=gmail_user, gmail_app_password=gmail_app_password,
                 destino=email_destino, assunto=assunto, html=html,
             )
-            db.insert_notificacao(conn, agora_utc.isoformat(), tipo)
+            db.insert_notificacao(conn, rota.id, agora_utc.isoformat(), tipo)
             conn.commit()
             log["emails_enviados"].append(assunto)
     elif tipos_email and dry_run:

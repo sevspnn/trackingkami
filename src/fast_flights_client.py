@@ -1,4 +1,4 @@
-"""Define as 6 consultas do projeto e executa cada uma com retry/backoff no
+"""Define as consultas de uma rota e executa cada uma com retry/backoff no
 fast-flights e fallback pro SerpApi (só naquela rodada) se esgotar as
 tentativas. Ver ETAPA 1 (schema real do fast-flights) e ETAPA 6 (schema
 real do SerpApi) pra contexto das decisões de parsing.
@@ -15,77 +15,81 @@ import config
 import parser as parser_mod
 import serpapi_client
 import serpapi_parser
+from config import RotaConfig
+
+# Únicos códigos de cidade (não-aeroporto) conhecidos que o fast-flights
+# aceita mas o SerpApi não — precisa traduzir pro aeroporto de verdade só
+# nesses casos (ver ETAPA 6). MCZ e SLZ já são aeroportos, passam direto.
+_TRADUCAO_SERPAPI = {"BHZ": "CNF"}
 
 
 def _serpapi_airport(codigo: str) -> str:
-    """SerpApi não aceita o city code BHZ (ver ETAPA 6) — traduz pro
-    aeroporto de verdade. NAT passa direto."""
-    return serpapi_client.AEROPORTO_DESTINO_ANCORA if codigo == config.DESTINO else codigo
+    return _TRADUCAO_SERPAPI.get(codigo, codigo)
 
 
-def construir_queries() -> list[dict]:
+def construir_queries(rota: RotaConfig) -> list[dict]:
     queries = [
         {
-            "tipo": "round_trip_1012",
+            "tipo": "round_trip_principal",
             "trip": "round-trip",
-            "legs": [(config.DATA_IDA, config.ORIGEM, config.DESTINO), (config.DATA_VOLTA, config.DESTINO, config.ORIGEM)],
-            "reference_date": config.DATA_IDA,
-            "aeroporto_origem": config.ORIGEM,
-            "aeroporto_destino": config.DESTINO,
-            "data_ida": config.DATA_IDA,
-            "data_volta": config.DATA_VOLTA,
+            "legs": [(rota.data_ida, rota.origem, rota.destino), (rota.data_volta, rota.destino, rota.origem)],
+            "reference_date": rota.data_ida,
+            "aeroporto_origem": rota.origem,
+            "aeroporto_destino": rota.destino,
+            "data_ida": rota.data_ida,
+            "data_volta": rota.data_volta,
         },
         {
             "tipo": "one_way_ida",
             "trip": "one-way",
-            "legs": [(config.DATA_IDA, config.ORIGEM, config.DESTINO)],
-            "reference_date": config.DATA_IDA,
-            "aeroporto_origem": config.ORIGEM,
-            "aeroporto_destino": config.DESTINO,
-            "data_ida": config.DATA_IDA,
+            "legs": [(rota.data_ida, rota.origem, rota.destino)],
+            "reference_date": rota.data_ida,
+            "aeroporto_origem": rota.origem,
+            "aeroporto_destino": rota.destino,
+            "data_ida": rota.data_ida,
             "data_volta": None,
         },
         {
-            "tipo": "one_way_volta_1012",
+            "tipo": "one_way_volta_principal",
             "trip": "one-way",
-            "legs": [(config.DATA_VOLTA, config.DESTINO, config.ORIGEM)],
-            "reference_date": config.DATA_VOLTA,
-            "aeroporto_origem": config.DESTINO,
-            "aeroporto_destino": config.ORIGEM,
+            "legs": [(rota.data_volta, rota.destino, rota.origem)],
+            "reference_date": rota.data_volta,
+            "aeroporto_origem": rota.destino,
+            "aeroporto_destino": rota.origem,
             "data_ida": None,
-            "data_volta": config.DATA_VOLTA,
+            "data_volta": rota.data_volta,
         },
     ]
-    if config.VARIANTE_FLEXIVEL_ATIVA:
+    if rota.variante_flexivel_ativa and rota.data_volta_flexivel:
         queries += [
             {
-                "tipo": "round_trip_1013",
+                "tipo": "round_trip_flexivel",
                 "trip": "round-trip",
                 "legs": [
-                    (config.DATA_IDA, config.ORIGEM, config.DESTINO),
-                    (config.DATA_VOLTA_FLEXIVEL, config.DESTINO, config.ORIGEM),
+                    (rota.data_ida, rota.origem, rota.destino),
+                    (rota.data_volta_flexivel, rota.destino, rota.origem),
                 ],
-                "reference_date": config.DATA_IDA,
-                "aeroporto_origem": config.ORIGEM,
-                "aeroporto_destino": config.DESTINO,
-                "data_ida": config.DATA_IDA,
-                "data_volta": config.DATA_VOLTA_FLEXIVEL,
+                "reference_date": rota.data_ida,
+                "aeroporto_origem": rota.origem,
+                "aeroporto_destino": rota.destino,
+                "data_ida": rota.data_ida,
+                "data_volta": rota.data_volta_flexivel,
             },
             {
-                "tipo": "one_way_volta_1013",
+                "tipo": "one_way_volta_flexivel",
                 "trip": "one-way",
-                "legs": [(config.DATA_VOLTA_FLEXIVEL, config.DESTINO, config.ORIGEM)],
-                "reference_date": config.DATA_VOLTA_FLEXIVEL,
-                "aeroporto_origem": config.DESTINO,
-                "aeroporto_destino": config.ORIGEM,
+                "legs": [(rota.data_volta_flexivel, rota.destino, rota.origem)],
+                "reference_date": rota.data_volta_flexivel,
+                "aeroporto_origem": rota.destino,
+                "aeroporto_destino": rota.origem,
                 "data_ida": None,
-                "data_volta": config.DATA_VOLTA_FLEXIVEL,
+                "data_volta": rota.data_volta_flexivel,
             },
         ]
     return queries
 
 
-def _tentar_fast_flights(spec: dict) -> list[parser_mod.ParsedOferta]:
+def _tentar_fast_flights(spec: dict) -> tuple[list[parser_mod.ParsedOferta], str]:
     flight_data = [FlightData(date=d, from_airport=o, to_airport=t) for d, o, t in spec["legs"]]
     filt = TFSData.from_interface(
         flight_data=flight_data,

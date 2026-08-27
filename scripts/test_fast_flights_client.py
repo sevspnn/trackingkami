@@ -29,7 +29,11 @@ def main():
     env = carregar_env(Path(__file__).resolve().parent.parent / ".env")
     serpapi_key = env.get("SERPAPI_KEY")
 
-    queries = ffc.construir_queries()
+    rota_id = sys.argv[1] if len(sys.argv) > 1 else config.ROTAS[0].id
+    rota = next(r for r in config.ROTAS if r.id == rota_id)
+    print(f"rota: {rota.id} ({rota.origem}->{rota.destino})\n")
+
+    queries = ffc.construir_queries(rota)
     print(f"{len(queries)} consultas a rodar\n")
 
     for i, spec in enumerate(queries):

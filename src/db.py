@@ -4,6 +4,11 @@ Convenções (ver PROMPT original):
 - preço sempre em centavos, inteiro, nunca float.
 - timestamps sempre em UTC, formato ISO 8601 ('YYYY-MM-DDTHH:MM:SS+00:00').
   O fuso de exibição (America/Fortaleza) é aplicado só na hora de renderizar.
+
+Multi-rota (adicionado em 27/08/2026): o projeto começou rastreando só
+NAT>BHZ. `rota` foi adicionado depois pra suportar várias viagens em
+paralelo, cada uma com seu próprio e-mail de destino. Dados antigos (só
+NAT>BHZ) são migrados com rota='nat_bhz_2026' pra não perder histórico.
 """
 
 from __future__ import annotations
@@ -12,9 +17,12 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+ROTA_LEGADO = "nat_bhz_2026"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS consultas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rota TEXT NOT NULL,
     ts_utc TEXT NOT NULL,
     tipo TEXT NOT NULL,
     origem TEXT NOT NULL,
@@ -47,9 +55,11 @@ CREATE TABLE IF NOT EXISTS ofertas (
 );
 
 CREATE TABLE IF NOT EXISTS historico_google (
-    ts_utc TEXT NOT NULL UNIQUE,
+    rota TEXT NOT NULL,
+    ts_utc TEXT NOT NULL,
     preco_centavos INTEGER NOT NULL,
-    importado_em TEXT NOT NULL
+    importado_em TEXT NOT NULL,
+    UNIQUE(rota, ts_utc)
 );
 
 -- Não fazia parte do schema original do prompt: necessária pra anti-spam
@@ -58,14 +68,15 @@ CREATE TABLE IF NOT EXISTS historico_google (
 -- memória do processo anterior.
 CREATE TABLE IF NOT EXISTS notificacoes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rota TEXT NOT NULL,
     ts_utc TEXT NOT NULL,
     tipo TEXT NOT NULL  -- 'rotina' | 'novo_minimo' | 'queda_significativa' | 'falha'
 );
 
 CREATE INDEX IF NOT EXISTS idx_consultas_ts ON consultas(ts_utc);
-CREATE INDEX IF NOT EXISTS idx_consultas_tipo ON consultas(tipo);
+CREATE INDEX IF NOT EXISTS idx_consultas_tipo ON consultas(rota, tipo);
 CREATE INDEX IF NOT EXISTS idx_ofertas_consulta ON ofertas(consulta_id);
-CREATE INDEX IF NOT EXISTS idx_historico_ts ON historico_google(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_historico_ts ON historico_google(rota, ts_utc);
 """
 
 
@@ -76,22 +87,61 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _coluna_existe(conn: sqlite3.Connection, tabela: str, coluna: str) -> bool:
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({tabela})").fetchall()]
+    return coluna in cols
+
+
+def _migrar_rota(conn: sqlite3.Connection) -> None:
+    """Bancos criados antes de 27/08/2026 não tinham coluna `rota`. Adiciona
+    e faz backfill com ROTA_LEGADO pra preservar o histórico do NAT>BHZ."""
+    for tabela in ("consultas", "notificacoes"):
+        if not _coluna_existe(conn, tabela, "rota"):
+            conn.execute(f"ALTER TABLE {tabela} ADD COLUMN rota TEXT NOT NULL DEFAULT '{ROTA_LEGADO}'")
+
+    if not _coluna_existe(conn, "historico_google", "rota"):
+        conn.execute(f"ALTER TABLE historico_google ADD COLUMN rota TEXT NOT NULL DEFAULT '{ROTA_LEGADO}'")
+        # a UNIQUE(ts_utc) antiga não cabe mais (agora é por rota) — mas
+        # ALTER TABLE do SQLite não remove constraints, então só recriamos
+        # a tabela se a antiga ainda tiver o UNIQUE simples.
+        indices = conn.execute("PRAGMA index_list(historico_google)").fetchall()
+        tem_unique_antigo = any(idx["unique"] and idx["origin"] == "u" for idx in indices)
+        if tem_unique_antigo:
+            conn.executescript(
+                """
+                ALTER TABLE historico_google RENAME TO historico_google_old;
+                CREATE TABLE historico_google (
+                    rota TEXT NOT NULL,
+                    ts_utc TEXT NOT NULL,
+                    preco_centavos INTEGER NOT NULL,
+                    importado_em TEXT NOT NULL,
+                    UNIQUE(rota, ts_utc)
+                );
+                INSERT INTO historico_google (rota, ts_utc, preco_centavos, importado_em)
+                    SELECT rota, ts_utc, preco_centavos, importado_em FROM historico_google_old;
+                DROP TABLE historico_google_old;
+                """
+            )
+    conn.commit()
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrar_rota(conn)
     conn.commit()
 
 
 def insert_consulta(conn: sqlite3.Connection, row: dict) -> int:
-    """row precisa ter: ts_utc, tipo, origem, destino, data_ida, data_volta,
+    """row precisa ter: rota, ts_utc, tipo, origem, destino, data_ida, data_volta,
     ok, erro, fonte, google_price_level, google_typical_low, google_typical_high
     """
     cur = conn.execute(
         """
         INSERT INTO consultas
-            (ts_utc, tipo, origem, destino, data_ida, data_volta,
+            (rota, ts_utc, tipo, origem, destino, data_ida, data_volta,
              ok, erro, fonte, google_price_level, google_typical_low, google_typical_high)
         VALUES
-            (:ts_utc, :tipo, :origem, :destino, :data_ida, :data_volta,
+            (:rota, :ts_utc, :tipo, :origem, :destino, :data_ida, :data_volta,
              :ok, :erro, :fonte, :google_price_level, :google_typical_low, :google_typical_high)
         """,
         row,
@@ -121,30 +171,33 @@ def insert_oferta(conn: sqlite3.Connection, consulta_id: int, row: dict) -> int:
     return cur.lastrowid
 
 
-def insert_notificacao(conn: sqlite3.Connection, ts_utc: str, tipo: str) -> None:
-    conn.execute("INSERT INTO notificacoes (ts_utc, tipo) VALUES (?, ?)", (ts_utc, tipo))
+def insert_notificacao(conn: sqlite3.Connection, rota: str, ts_utc: str, tipo: str) -> None:
+    conn.execute("INSERT INTO notificacoes (rota, ts_utc, tipo) VALUES (?, ?, ?)", (rota, ts_utc, tipo))
 
 
-def ultima_notificacao_imediata(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+def ultima_notificacao_imediata(conn: sqlite3.Connection, rota: str) -> Optional[sqlite3.Row]:
     return conn.execute(
         """
         SELECT ts_utc, tipo FROM notificacoes
-        WHERE tipo IN ('novo_minimo', 'queda_significativa')
+        WHERE rota = ? AND tipo IN ('novo_minimo', 'queda_significativa')
         ORDER BY ts_utc DESC LIMIT 1
-        """
+        """,
+        (rota,),
     ).fetchone()
 
 
-def insert_historico_google(conn: sqlite3.Connection, ts_utc: str, preco_centavos: int, importado_em: str) -> None:
-    """Upsert por ts_utc: reimportações semanais sobrepõem a janela de ~60
-    dias da anterior, então precisa substituir, não duplicar."""
+def insert_historico_google(
+    conn: sqlite3.Connection, rota: str, ts_utc: str, preco_centavos: int, importado_em: str
+) -> None:
+    """Upsert por (rota, ts_utc): reimportações semanais sobrepõem a janela
+    de ~60 dias da anterior, então precisa substituir, não duplicar."""
     conn.execute(
         """
-        INSERT INTO historico_google (ts_utc, preco_centavos, importado_em)
-        VALUES (?, ?, ?)
-        ON CONFLICT(ts_utc) DO UPDATE SET
+        INSERT INTO historico_google (rota, ts_utc, preco_centavos, importado_em)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(rota, ts_utc) DO UPDATE SET
             preco_centavos = excluded.preco_centavos,
             importado_em = excluded.importado_em
         """,
-        (ts_utc, preco_centavos, importado_em),
+        (rota, ts_utc, preco_centavos, importado_em),
     )

@@ -1,7 +1,8 @@
-"""Teste manual da etapa 5: chama o SerpApi de verdade, importa price_history
-pra dentro de data/tracker.db (banco real do projeto, não o de teste).
+"""Bootstrap/recalibração do histórico via SerpApi pra uma rota — importa
+price_history pra dentro de data/tracker.db (banco real do projeto).
 
-Uso: python scripts/bootstrap_serpapi.py
+Uso: python scripts/bootstrap_serpapi.py [rota_id]
+     (rota_id default: primeira rota ativa em config.ROTAS)
 """
 
 import sys
@@ -10,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import config
 import db
+from fast_flights_client import _serpapi_airport
 from serpapi_client import SerpApiError, buscar_price_insights
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,10 +37,15 @@ def main():
         print("SERPAPI_KEY não configurada no .env — nada a fazer (comportamento esperado do projeto).")
         return
 
-    print("Buscando price_insights (NAT -> CNF, 2026-10-08 / 2026-10-12)...")
+    rota_id = sys.argv[1] if len(sys.argv) > 1 else config.ROTAS[0].id
+    rota = next(r for r in config.ROTAS if r.id == rota_id)
+    destino_serpapi = _serpapi_airport(rota.destino)
+
+    print(f"Buscando price_insights ({rota.origem} -> {destino_serpapi}, {rota.data_ida} / {rota.data_volta})...")
     try:
         pi = buscar_price_insights(
-            api_key=api_key, origem="NAT", data_ida="2026-10-08", data_volta="2026-10-12"
+            api_key=api_key, origem=rota.origem, destino=destino_serpapi,
+            data_ida=rota.data_ida, data_volta=rota.data_volta,
         )
     except SerpApiError as e:
         print(f"FALHA: {e}")
@@ -52,16 +60,17 @@ def main():
     db.init_db(conn)
 
     agora = datetime.now(timezone.utc).isoformat()
-    antes = conn.execute("SELECT COUNT(*) FROM historico_google").fetchone()[0]
+    antes = conn.execute("SELECT COUNT(*) FROM historico_google WHERE rota = ?", (rota.id,)).fetchone()[0]
     for ts_utc, preco_centavos in pi.price_history:
-        db.insert_historico_google(conn, ts_utc.isoformat(), preco_centavos, agora)
+        db.insert_historico_google(conn, rota.id, ts_utc.isoformat(), preco_centavos, agora)
     conn.commit()
-    depois = conn.execute("SELECT COUNT(*) FROM historico_google").fetchone()[0]
+    depois = conn.execute("SELECT COUNT(*) FROM historico_google WHERE rota = ?", (rota.id,)).fetchone()[0]
 
-    print(f"\nhistorico_google: {antes} -> {depois} linhas ({depois - antes} inseridas)")
+    print(f"\nhistorico_google[{rota.id}]: {antes} -> {depois} linhas ({depois - antes} novas/atualizadas)")
 
     amostra = conn.execute(
-        "SELECT ts_utc, preco_centavos FROM historico_google ORDER BY ts_utc DESC LIMIT 5"
+        "SELECT ts_utc, preco_centavos FROM historico_google WHERE rota = ? ORDER BY ts_utc DESC LIMIT 5",
+        (rota.id,),
     ).fetchall()
     print("\n5 mais recentes:")
     for r in amostra:

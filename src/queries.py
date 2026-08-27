@@ -13,24 +13,24 @@ from emailer import FUSO_EXIBICAO
 from metrics import PricePoint
 
 
-def serie_mais_barato_da_rodada(conn: sqlite3.Connection, tipo: str = "round_trip_1012") -> list[PricePoint]:
+def serie_mais_barato_da_rodada(conn: sqlite3.Connection, rota: str, tipo: str = "round_trip_principal") -> list[PricePoint]:
     """Uma amostra por rodada ok: a oferta mais barata daquela consulta,
     pode trocar de cia/horário entre rodadas."""
     rows = conn.execute(
         """
         SELECT c.ts_utc AS ts, MIN(o.preco_centavos) AS preco
         FROM consultas c JOIN ofertas o ON o.consulta_id = c.id
-        WHERE c.tipo = ? AND c.ok = 1
+        WHERE c.rota = ? AND c.tipo = ? AND c.ok = 1
         GROUP BY c.id
         ORDER BY c.ts_utc
         """,
-        (tipo,),
+        (rota, tipo),
     ).fetchall()
     return [PricePoint(ts_utc=datetime.fromisoformat(r["ts"]), preco_centavos=r["preco"]) for r in rows]
 
 
 def serie_itinerario_referencia(
-    conn: sqlite3.Connection, *, tipo: str, cia: str, hora_min: str, hora_max: str
+    conn: sqlite3.Connection, *, rota: str, tipo: str, cia: str, hora_min: str, hora_max: str
 ) -> list[PricePoint]:
     """Uma amostra por rodada ok em que a cia fixada operou dentro da janela
     de horário de saída (local, America/Fortaleza) fixada. Se a cia não
@@ -40,10 +40,10 @@ def serie_itinerario_referencia(
         """
         SELECT c.id AS consulta_id, c.ts_utc AS ts, o.preco_centavos, o.saida_ts
         FROM consultas c JOIN ofertas o ON o.consulta_id = c.id
-        WHERE c.tipo = ? AND c.ok = 1 AND o.cia = ? AND o.saida_ts IS NOT NULL
+        WHERE c.rota = ? AND c.tipo = ? AND c.ok = 1 AND o.cia = ? AND o.saida_ts IS NOT NULL
         ORDER BY c.ts_utc
         """,
-        (tipo, cia),
+        (rota, tipo, cia),
     ).fetchall()
 
     melhor_por_consulta: dict[int, PricePoint] = {}
@@ -60,14 +60,14 @@ def serie_itinerario_referencia(
 
 
 def candidatos_itinerario_referencia(
-    conn: sqlite3.Connection, *, tipo: str = "round_trip_1012", top_n: int = 6
+    conn: sqlite3.Connection, *, rota: str, tipo: str = "round_trip_principal", top_n: int = 6
 ) -> list[dict]:
     """Pra 'na primeira execução, sugira candidatos': olha a rodada ok mais
     recente daquele tipo e lista os itinerários (cia + horário de saída da
     ida) distintos mais baratos, pra você escolher qual fixar."""
     consulta = conn.execute(
-        "SELECT id, ts_utc FROM consultas WHERE tipo = ? AND ok = 1 ORDER BY ts_utc DESC LIMIT 1",
-        (tipo,),
+        "SELECT id, ts_utc FROM consultas WHERE rota = ? AND tipo = ? AND ok = 1 ORDER BY ts_utc DESC LIMIT 1",
+        (rota, tipo),
     ).fetchone()
     if not consulta:
         return []
