@@ -63,8 +63,27 @@ jobs:
           git add data/tracker.db
           if git diff --cached --quiet; then
             echo "Nada novo no banco nesta rodada, pulando commit."
-          else
-            HORA_LOCAL=$(TZ='America/Fortaleza' date '+%Y-%m-%d %H:%M')
-            git commit -m "dados: rodada ${HORA_LOCAL}"
-            git push
+            exit 0
           fi
+
+          HORA_LOCAL=$(TZ='America/Fortaleza' date '+%Y-%m-%d %H:%M')
+          git commit -m "dados: rodada ${HORA_LOCAL}"
+
+          # git push já falhou algumas vezes com "fatal error in commit_refs"
+          # do lado do GitHub (transitório) — sem retry aqui, a rodada
+          # inteira (dados + qualquer alerta que já tenha sido mandado por
+          # e-mail) some do histórico persistente. 3 tentativas com backoff,
+          # revalidando contra o remoto antes de tentar de novo.
+          TENTATIVA=0
+          MAX_TENTATIVAS=3
+          until git push; do
+            TENTATIVA=$((TENTATIVA + 1))
+            if [ "$TENTATIVA" -ge "$MAX_TENTATIVAS" ]; then
+              echo "git push falhou após ${MAX_TENTATIVAS} tentativas, desistindo."
+              exit 1
+            fi
+            ESPERA=$((TENTATIVA * 8))
+            echo "git push falhou (tentativa ${TENTATIVA}/${MAX_TENTATIVAS}), tentando de novo em ${ESPERA}s..."
+            sleep "$ESPERA"
+            git pull --rebase origin main || true
+          done
