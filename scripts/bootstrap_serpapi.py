@@ -39,12 +39,13 @@ def main():
 
     rota_id = sys.argv[1] if len(sys.argv) > 1 else config.ROTAS[0].id
     rota = next(r for r in config.ROTAS if r.id == rota_id)
+    origem_serpapi = _serpapi_airport(rota.origem)
     destino_serpapi = _serpapi_airport(rota.destino)
 
-    print(f"Buscando price_insights ({rota.origem} -> {destino_serpapi}, {rota.data_ida} / {rota.data_volta})...")
+    print(f"Buscando price_insights ({origem_serpapi} -> {destino_serpapi}, {rota.data_ida} / {rota.data_volta})...")
     try:
         pi = buscar_price_insights(
-            api_key=api_key, origem=rota.origem, destino=destino_serpapi,
+            api_key=api_key, origem=origem_serpapi, destino=destino_serpapi,
             data_ida=rota.data_ida, data_volta=rota.data_volta,
         )
     except SerpApiError as e:

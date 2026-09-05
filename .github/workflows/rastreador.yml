@@ -49,6 +49,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_DESTINO: ${{ secrets.EMAIL_DESTINO }}      # rota "maceio"
           EMAIL_DESTINO_2: ${{ secrets.EMAIL_DESTINO_2 }}  # rota "sao_luis"
+          EMAIL_DESTINO_3: ${{ secrets.EMAIL_DESTINO_3 }}  # rota "belo_horizonte"
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           # Diz pro main.py se essa é a rodada de rotina (07:17) direto pelo
           # cron que disparou — não pela hora local depois do jitter, que o
