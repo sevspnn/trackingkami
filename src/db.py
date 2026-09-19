@@ -175,6 +175,14 @@ def insert_notificacao(conn: sqlite3.Connection, rota: str, ts_utc: str, tipo: s
     conn.execute("INSERT INTO notificacoes (rota, ts_utc, tipo) VALUES (?, ?, ?)", (rota, ts_utc, tipo))
 
 
+def contar_serpapi_desde(conn: sqlite3.Connection, desde_ts_utc: str) -> int:
+    """Quantas consultas usaram o fallback SerpApi de desde_ts_utc (ISO UTC) em diante."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM consultas WHERE fonte = 'serpapi_fallback' AND ts_utc >= ?",
+        (desde_ts_utc,),
+    ).fetchone()[0]
+
+
 def ultima_notificacao_imediata(conn: sqlite3.Connection, rota: str) -> Optional[sqlite3.Row]:
     return conn.execute(
         """

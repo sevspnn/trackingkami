@@ -38,6 +38,12 @@ EMAIL_ROTINA_HORA_LOCAL = 7
 MAX_TENTATIVAS_FAST_FLIGHTS = 2
 BACKOFF_BASE_SEGUNDOS = 5
 
+# Teto de chamadas ao SerpApi (fallback) numa janela móvel de 24h, somando todas as
+# rotas. O plano tem 250 buscas/mês; em 13/09/2026 um bug no fast-flights mandou
+# todas as consultas pro fallback (~36/dia) e drenou 90% da quota. Com 6/dia o
+# pior caso do mês fica em 180. Estourou o teto = a consulta falha em vez de gastar.
+MAX_SERPAPI_POR_24H = 6
+
 JITTER_ENTRE_CONSULTAS_MIN_S = 3
 JITTER_ENTRE_CONSULTAS_MAX_S = 8
 

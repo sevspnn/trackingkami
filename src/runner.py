@@ -116,7 +116,10 @@ def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[
     resultados = {}
 
     for i, spec in enumerate(queries):
-        resultado = ffc.executar_consulta(spec, serpapi_key=serpapi_key)
+        teto_atingido = conn is not None and db.contar_serpapi_desde(
+            conn, (agora_utc - timedelta(hours=24)).isoformat()
+        ) >= config.MAX_SERPAPI_POR_24H
+        resultado = ffc.executar_consulta(spec, serpapi_key=serpapi_key, serpapi_teto_atingido=teto_atingido)
         resultados[spec["tipo"]] = resultado
         log["consultas"][spec["tipo"]] = {
             "ok": resultado["ok"],

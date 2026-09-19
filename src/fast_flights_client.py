@@ -122,9 +122,10 @@ def _tentar_serpapi_fallback(spec: dict, serpapi_key: str) -> tuple[list[parser_
     return ofertas, price_level
 
 
-def executar_consulta(spec: dict, *, serpapi_key: Optional[str] = None) -> dict:
+def executar_consulta(spec: dict, *, serpapi_key: Optional[str] = None, serpapi_teto_atingido: bool = False) -> dict:
     """Roda uma consulta com retry+backoff no fast-flights; se esgotar,
-    tenta SerpApi só nessa rodada (se houver chave). Nunca levanta exceção
+    tenta SerpApi só nessa rodada (se houver chave e o teto de chamadas
+    não estiver atingido). Nunca levanta exceção
     — sempre devolve um dict com 'ok' indicando sucesso ou falha."""
     erros = []
     for tentativa in range(1, config.MAX_TENTATIVAS_FAST_FLIGHTS + 1):
@@ -143,6 +144,15 @@ def executar_consulta(spec: dict, *, serpapi_key: Optional[str] = None) -> dict:
                 time.sleep(config.BACKOFF_BASE_SEGUNDOS * (2 ** (tentativa - 1)))
 
     erro_fast_flights = "; ".join(erros)
+
+    if serpapi_key and serpapi_teto_atingido:
+        return {
+            "ok": False,
+            "fonte": "nenhuma",
+            "ofertas": [],
+            "google_price_level": None,
+            "erro": f"fast-flights falhou ({erro_fast_flights}); fallback SerpApi bloqueado: teto de {config.MAX_SERPAPI_POR_24H} chamadas/24h atingido",
+        }
 
     if serpapi_key:
         try:
