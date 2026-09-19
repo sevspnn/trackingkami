@@ -1,3 +1,4 @@
 fast-flights==2.2
+primp==0.15.0  # fast-flights 2.2 usa impersonate="chrome_126", removido no primp 2.x (quebrou tudo em 13/09/2026 e drenou a quota do SerpApi)
 typing_extensions
 requests
