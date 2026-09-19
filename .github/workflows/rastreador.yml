@@ -25,15 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40  # cobre até 20min de jitter + consultas + retries
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Jitter (0-20min, só em rodadas agendadas)
         if: github.event_name == 'schedule'
         run: |
           SEGUNDOS=$(( RANDOM % 1200 ))
           echo "Aguardando ${SEGUNDOS}s de jitter antes de começar..."
           sleep "$SEGUNDOS"
+
+      # Checkout depois do jitter: o banco é commitado de volta a cada rodada, e um
+      # checkout feito antes de até 20min de espera fica desatualizado — se outra
+      # rodada (ex: manual) commitar nesse meio tempo, o push conflita no tracker.db
+      # (binário, o rebase não resolve) e a rodada inteira é perdida.
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
