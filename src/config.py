@@ -71,13 +71,18 @@ ROTAS: list[RotaConfig] = [
         itinerario_referencia={"cia": "LATAM", "saida_ida_hora_min": "11:55", "saida_ida_hora_max": "12:55"},
     ),
     RotaConfig(
-        id="belo_horizonte",
+        # id novo (era "belo_horizonte", 29/12 → 05/01) porque as datas mudaram em
+        # 19/10/2026: o histórico é por rota, não por data, e misturar preços de
+        # datas diferentes estragaria mediana/mínimo. O histórico antigo continua
+        # no banco sob o id "belo_horizonte".
+        id="belo_horizonte_natal",
         origem="BHZ",  # city code — fast-flights aceita direto; SerpApi traduz pra CNF (ver fast_flights_client._TRADUCAO_SERPAPI)
         destino="NAT",
-        data_ida="2026-12-29",
-        data_volta="2027-01-05",
+        data_ida="2026-12-25",
+        data_volta="2027-01-01",
         email_env_var="EMAIL_DESTINO_3",
-        # Fixado em 05/09/2026 a partir dos candidatos da primeira rodada real.
+        # Fixado em 05/09/2026 a partir dos candidatos da primeira rodada real
+        # (pras datas antigas — revisar se a LATAM nessa janela não existir em 25/12).
         itinerario_referencia={"cia": "LATAM", "saida_ida_hora_min": "10:00", "saida_ida_hora_max": "11:00"},
     ),
 ]
