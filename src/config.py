@@ -60,16 +60,18 @@ ROTAS: list[RotaConfig] = [
         # Fixado em 27/08/2026 a partir dos candidatos da primeira rodada real.
         itinerario_referencia={"cia": "Gol", "saida_ida_hora_min": "11:40", "saida_ida_hora_max": "12:40"},
     ),
-    RotaConfig(
-        id="sao_luis",
-        origem="NAT",
-        destino="SLZ",
-        data_ida="2027-01-08",
-        data_volta="2027-01-11",
-        email_env_var="EMAIL_DESTINO_2",
-        # Fixado em 27/08/2026 a partir dos candidatos da primeira rodada real.
-        itinerario_referencia={"cia": "LATAM", "saida_ida_hora_min": "11:55", "saida_ida_hora_max": "12:55"},
-    ),
+    # Desativada em 01/11/2026. O histórico continua no banco sob o id "sao_luis";
+    # pra reativar, é só descomentar.
+    # RotaConfig(
+    #     id="sao_luis",
+    #     origem="NAT",
+    #     destino="SLZ",
+    #     data_ida="2027-01-08",
+    #     data_volta="2027-01-11",
+    #     email_env_var="EMAIL_DESTINO_2",
+    #     # Fixado em 27/08/2026 a partir dos candidatos da primeira rodada real.
+    #     itinerario_referencia={"cia": "LATAM", "saida_ida_hora_min": "11:55", "saida_ida_hora_max": "12:55"},
+    # ),
     RotaConfig(
         # id novo (era "belo_horizonte", 29/12 → 05/01) porque as datas mudaram em
         # 19/10/2026: o histórico é por rota, não por data, e misturar preços de
