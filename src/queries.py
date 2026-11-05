@@ -29,6 +29,30 @@ def serie_mais_barato_da_rodada(conn: sqlite3.Connection, rota: str, tipo: str =
     return [PricePoint(ts_utc=datetime.fromisoformat(r["ts"]), preco_centavos=r["preco"]) for r in rows]
 
 
+def serie_dois_trechos(
+    conn: sqlite3.Connection, rota: str, prefixo_ida: str = "trecho_ida_", prefixo_volta: str = "trecho_volta_"
+) -> list[PricePoint]:
+    """Série do modo dois trechos: uma amostra por rodada = (ida mais
+    barata entre as datas de ida) + (volta mais barata entre as datas de
+    volta). Todas as consultas de uma rodada compartilham o mesmo ts_utc,
+    então é por ele que a rodada é identificada. Rodada sem nenhum trecho
+    de ida ok (ou nenhum de volta) não gera ponto."""
+    rows = conn.execute(
+        """
+        SELECT c.ts_utc AS ts,
+               MIN(CASE WHEN c.tipo LIKE ? || '%' THEN o.preco_centavos END) AS ida,
+               MIN(CASE WHEN c.tipo LIKE ? || '%' THEN o.preco_centavos END) AS volta
+        FROM consultas c JOIN ofertas o ON o.consulta_id = c.id
+        WHERE c.rota = ? AND c.ok = 1
+        GROUP BY c.ts_utc
+        HAVING ida IS NOT NULL AND volta IS NOT NULL
+        ORDER BY c.ts_utc
+        """,
+        (prefixo_ida, prefixo_volta, rota),
+    ).fetchall()
+    return [PricePoint(ts_utc=datetime.fromisoformat(r["ts"]), preco_centavos=r["ida"] + r["volta"]) for r in rows]
+
+
 def serie_itinerario_referencia(
     conn: sqlite3.Connection, *, rota: str, tipo: str, cia: str, hora_min: str, hora_max: str
 ) -> list[PricePoint]:

@@ -27,7 +27,42 @@ def _serpapi_airport(codigo: str) -> str:
     return _TRADUCAO_SERPAPI.get(codigo, codigo)
 
 
+TIPO_PREFIXO_TRECHO_IDA = "trecho_ida_"
+TIPO_PREFIXO_TRECHO_VOLTA = "trecho_volta_"
+
+
+def _query_trecho(tipo: str, data: str, origem: str, destino: str, *, eh_volta: bool) -> dict:
+    return {
+        "tipo": tipo,
+        "trip": "one-way",
+        "legs": [(data, origem, destino)],
+        "reference_date": data,
+        "aeroporto_origem": origem,
+        "aeroporto_destino": destino,
+        "data_ida": None if eh_volta else data,
+        "data_volta": data if eh_volta else None,
+    }
+
+
+def construir_queries_dois_trechos(rota: RotaConfig) -> list[dict]:
+    """Modo dois trechos (ida e volta por cidades diferentes): só one-way,
+    uma consulta por (trecho, data). tipo = 'trecho_ida_YYYY-MM-DD' /
+    'trecho_volta_YYYY-MM-DD' — a série histórica junta tudo pelo prefixo
+    (ver queries.serie_dois_trechos)."""
+    queries = [
+        _query_trecho(f"{TIPO_PREFIXO_TRECHO_IDA}{d}", d, rota.origem, rota.destino, eh_volta=False)
+        for d in rota.datas_ida
+    ]
+    queries += [
+        _query_trecho(f"{TIPO_PREFIXO_TRECHO_VOLTA}{d}", d, rota.volta_origem, rota.volta_destino, eh_volta=True)
+        for d in rota.datas_volta
+    ]
+    return queries
+
+
 def construir_queries(rota: RotaConfig) -> list[dict]:
+    if rota.dois_trechos:
+        return construir_queries_dois_trechos(rota)
     queries = [
         {
             "tipo": "round_trip_principal",

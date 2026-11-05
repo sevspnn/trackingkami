@@ -101,7 +101,7 @@ def _rodar_rota(rota, *, gmail_user, gmail_app_password, serpapi_key, dry_run, f
                 ctx = emailer.FalhaContext(
                     origem=rota.origem, destino=rota.destino, rodada_hora_local=hora_local,
                     erro=f"Crash não tratado no main.py (rota={rota.id}):\n\n{erro_completo[-3000:]}",
-                    ts_utc=agora,
+                    ts_utc=agora, rotulo=rota.rotulo,
                 )
                 assunto, html = emailer.render_falha(ctx)
                 emailer.send_email(

@@ -59,9 +59,14 @@ def _perna_de_oferta(oferta) -> Optional[emailer.PernaVoo]:
     )
 
 
-def _serie_historica(db_path: Path, rota_id: str, tipo: str, *, conn=None) -> list[metrics.PricePoint]:
+def _serie_historica(db_path: Path, rota: RotaConfig, tipo: str = TIPO_PRIMARIO, *, conn=None) -> list[metrics.PricePoint]:
+    def ler(c):
+        if rota.dois_trechos:
+            return queries_mod.serie_dois_trechos(c, rota.id)
+        return queries_mod.serie_mais_barato_da_rodada(c, rota.id, tipo)
+
     if conn is not None:
-        return queries_mod.serie_mais_barato_da_rodada(conn, rota_id, tipo)
+        return ler(conn)
     if not os.path.exists(db_path):
         return []
     conn_leitura = db.connect(db_path)
@@ -69,7 +74,7 @@ def _serie_historica(db_path: Path, rota_id: str, tipo: str, *, conn=None) -> li
         # Não chama db.init_db aqui de propósito: --dry-run não pode
         # escrever nada no arquivo, nem migração de schema. O banco real
         # é migrado pela primeira rodada não-dry-run (ou manualmente).
-        return queries_mod.serie_mais_barato_da_rodada(conn_leitura, rota_id, tipo)
+        return ler(conn_leitura)
     finally:
         conn_leitura.close()
 
@@ -92,6 +97,52 @@ def _ja_enviou_rotina_hoje(conn, rota_id: str, hora_local: datetime) -> bool:
         (rota_id,),
     ).fetchall()
     return any(datetime.fromisoformat(r["ts_utc"]).astimezone(emailer.FUSO_EXIBICAO).date() == hoje for r in rows)
+
+
+def _resumo_dois_trechos(rota: RotaConfig, queries: list[dict], resultados: dict) -> dict:
+    """Junta as consultas one-way do modo dois trechos num 'resultado
+    primário': preço = ida mais barata (entre as datas de ida) + volta mais
+    barata (entre as datas de volta). Uma data falhar não derruba a rodada,
+    desde que pelo menos um trecho de ida e um de volta tenham dado certo."""
+    melhor = {}  # 'ida'/'volta' -> (preco, data, oferta)
+    opcoes = []
+    erros = []
+    for spec in queries:
+        eh_volta = spec["tipo"].startswith(ffc.TIPO_PREFIXO_TRECHO_VOLTA)
+        lado = "volta" if eh_volta else "ida"
+        data = spec["legs"][0][0]
+        res = resultados[spec["tipo"]]
+        oferta = _oferta_mais_barata(res)
+        if oferta is None:
+            erros.append(f"{lado} {data}: {res['erro'] or 'sem ofertas'}")
+        elif lado not in melhor or oferta.preco_centavos < melhor[lado][0]:
+            melhor[lado] = (oferta.preco_centavos, data, oferta, spec["tipo"])
+        opcoes.append((lado, data, spec, oferta))
+
+    ok = "ida" in melhor and "volta" in melhor
+    opcoes_ctx = [
+        emailer.OpcaoTrecho(
+            rotulo=f"{'Volta' if lado == 'volta' else 'Ida'} {emailer.formatar_data_curta(data)} "
+                   f"{spec['aeroporto_origem']}→{spec['aeroporto_destino']}",
+            preco_centavos=oferta.preco_centavos if oferta else None,
+            perna=_perna_de_oferta(oferta),
+            escolhida=lado in melhor and melhor[lado][3] == spec["tipo"],
+        )
+        for lado, data, spec, oferta in opcoes
+    ]
+    return {
+        "ok": ok,
+        "erro": "; ".join(erros) or None,
+        "preco": (melhor["ida"][0] + melhor["volta"][0]) if ok else None,
+        "data_ida": melhor["ida"][1] if "ida" in melhor else rota.data_ida,
+        "data_volta": melhor["volta"][1] if "volta" in melhor else rota.data_volta,
+        "perna_ida": _perna_de_oferta(melhor["ida"][2]) if "ida" in melhor else None,
+        "perna_volta": _perna_de_oferta(melhor["volta"][2]) if "volta" in melhor else None,
+        # O nível do Google (low/typical/high) vem por consulta, ou seja, por
+        # trecho avulso — não diz nada sobre a viagem combinada, então fica de fora.
+        "google_price_level": None,
+        "opcoes": opcoes_ctx,
+    }
 
 
 def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[str],
@@ -133,8 +184,11 @@ def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[
                 "rota": rota.id,
                 "ts_utc": agora_utc.isoformat(),
                 "tipo": spec["tipo"],
-                "origem": rota.origem,
-                "destino": rota.destino,
+                # Modo dois trechos grava os aeroportos de cada trecho (a
+                # volta não é o inverso da ida); o modo clássico mantém a
+                # convenção histórica de sempre gravar os da rota.
+                "origem": spec["aeroporto_origem"] if rota.dois_trechos else rota.origem,
+                "destino": spec["aeroporto_destino"] if rota.dois_trechos else rota.destino,
                 "data_ida": spec["data_ida"],
                 "data_volta": spec["data_volta"],
                 "ok": 1 if resultado["ok"] else 0,
@@ -152,23 +206,33 @@ def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[
         if i < len(queries) - 1:
             _sleep_jitter()
 
-    resultado_primario = resultados[TIPO_PRIMARIO]
+    if rota.dois_trechos:
+        resumo = _resumo_dois_trechos(rota, queries, resultados)
+        primario_ok, primario_erro = resumo["ok"], resumo["erro"]
+        log["preco_combinado"] = resumo["preco"]
+    else:
+        resultado_primario = resultados[TIPO_PRIMARIO]
+        primario_ok, primario_erro = resultado_primario["ok"], resultado_primario["erro"]
     tipos_email: list[str] = []
     ctx_falha: Optional[emailer.FalhaContext] = None
     ctx_rodada: Optional[emailer.RodadaContext] = None
 
-    if not resultado_primario["ok"]:
+    if not primario_ok:
         tipos_email = ["falha"]
         ctx_falha = emailer.FalhaContext(
             origem=rota.origem,
             destino=rota.destino,
             rodada_hora_local=hora_local.strftime("%H:%M"),
-            erro=resultado_primario["erro"] or "erro desconhecido",
+            erro=primario_erro or "erro desconhecido",
             ts_utc=agora_utc,
+            rotulo=rota.rotulo,
         )
     else:
-        preco_atual = _preco_min(resultado_primario)
-        serie_antes = _serie_historica(db_path, rota.id, TIPO_PRIMARIO, conn=conn)
+        if rota.dois_trechos:
+            preco_atual = resumo["preco"]
+        else:
+            preco_atual = _preco_min(resultado_primario)
+        serie_antes = _serie_historica(db_path, rota, conn=conn)
         if conn is not None and serie_antes:
             serie_antes = serie_antes[:-1]  # exclui a rodada que acabamos de inserir
 
@@ -195,6 +259,28 @@ def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[
             media, n = metrics.media_geral(serie_exibicao)
             pct = metrics.variacao_pct(preco_atual, mediana) if len(serie_antes) >= metrics.MIN_AMOSTRAS_PARA_PORCENTAGEM else None
 
+            if rota.dois_trechos:
+                ctx_rodada = emailer.RodadaContext(
+                    origem=rota.origem,
+                    destino=rota.destino,
+                    data_ida=resumo["data_ida"],
+                    data_volta=resumo["data_volta"],
+                    preco_centavos=preco_atual,
+                    n_amostras=n,
+                    pct_mediana=pct,
+                    mediana_centavos=mediana,
+                    minimo_historico_centavos=minimo.preco_centavos if minimo else None,
+                    media_centavos=media,
+                    google_price_level=resumo["google_price_level"],
+                    perna_ida=resumo["perna_ida"],
+                    perna_volta=resumo["perna_volta"],
+                    rotulo=rota.rotulo,
+                    trecho_ida=f"{rota.origem}→{rota.destino}",
+                    trecho_volta=f"{rota.volta_origem}→{rota.volta_destino}",
+                    opcoes_trechos=resumo["opcoes"],
+                )
+
+        if tipos_email and not rota.dois_trechos:
             preco_ida = _preco_min(resultados["one_way_ida"])
             preco_volta = _preco_min(resultados["one_way_volta_principal"])
             comparacao_ow = None
@@ -210,7 +296,7 @@ def rodar(*, rota: RotaConfig, serpapi_key: Optional[str], gmail_user: Optional[
             variante = None
             if rota.variante_flexivel_ativa and resultados.get("round_trip_flexivel", {}).get("ok"):
                 preco_flex = _preco_min(resultados["round_trip_flexivel"])
-                serie_flex = _serie_historica(db_path, rota.id, "round_trip_flexivel", conn=conn)
+                serie_flex = _serie_historica(db_path, rota, "round_trip_flexivel", conn=conn)
                 pct_flex = None
                 if len(serie_flex) >= metrics.MIN_AMOSTRAS_PARA_PORCENTAGEM:
                     med_flex = metrics.mediana_movel_14d(serie_flex, agora_utc)

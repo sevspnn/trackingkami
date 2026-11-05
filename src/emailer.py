@@ -92,6 +92,15 @@ class VarianteFlexivel:
 
 
 @dataclass
+class OpcaoTrecho:
+    """Uma linha da tabela 'por data' do modo dois trechos."""
+    rotulo: str  # ex: 'Ida 02/01 NAT→BSB'
+    preco_centavos: Optional[int]  # None = consulta falhou nessa rodada
+    perna: Optional[PernaVoo] = None
+    escolhida: bool = False
+
+
+@dataclass
 class RodadaContext:
     origem: str
     destino: str
@@ -108,6 +117,11 @@ class RodadaContext:
     perna_volta: Optional[PernaVoo] = None
     comparacao_ow: Optional[ComparacaoOW] = None
     variante_flexivel: Optional[VarianteFlexivel] = None
+    # Modo dois trechos (ida e volta por cidades diferentes):
+    rotulo: Optional[str] = None  # ex: 'NAT>BSB>REC'; None = origem>destino
+    trecho_ida: Optional[str] = None  # ex: 'NAT→BSB', aparece ao lado de "Ida dd/mm"
+    trecho_volta: Optional[str] = None  # ex: 'BSB→REC'
+    opcoes_trechos: list[OpcaoTrecho] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +131,11 @@ class FalhaContext:
     rodada_hora_local: str  # 'HH:MM', já em horário local
     erro: str
     ts_utc: Optional[datetime] = None
+    rotulo: Optional[str] = None
+
+
+def _rotulo(ctx) -> str:
+    return ctx.rotulo or f"{ctx.origem}>{ctx.destino}"
 
 
 _CSS = """
@@ -190,17 +209,36 @@ def _linha_variante(v: Optional[VarianteFlexivel]) -> str:
     )
 
 
+def _tabela_opcoes_trechos(opcoes: list[OpcaoTrecho]) -> str:
+    if not opcoes:
+        return ""
+    linhas = []
+    for op in opcoes:
+        preco = formatar_reais(op.preco_centavos) if op.preco_centavos is not None else "falhou nesta rodada"
+        marca = " ✓" if op.escolhida else ""
+        detalhe = ""
+        if op.perna is not None:
+            detalhe = f"{op.perna.cia or '?'} · {formatar_hora_local(op.perna.saida_ts)} → {formatar_hora_local(op.perna.chegada_ts)}"
+        linhas.append(f"<tr><th>{op.rotulo}{marca}</th><td>{preco}</td><td>{detalhe}</td></tr>")
+    return (
+        '<tr><th colspan="3">Mais barato por data (trechos avulsos)</th></tr>' + "".join(linhas)
+    )
+
+
 def _corpo_tabela(ctx: RodadaContext) -> str:
+    rot_ida = "Ida " + formatar_data_curta(ctx.data_ida) + (f" {ctx.trecho_ida}" if ctx.trecho_ida else "")
+    rot_volta = "Volta " + formatar_data_curta(ctx.data_volta) + (f" {ctx.trecho_volta}" if ctx.trecho_volta else "")
     return f"""
     <table>
       <tr><th colspan="3" class="preco">{formatar_reais(ctx.preco_centavos)}</th></tr>
-      {_linha_perna("Ida " + formatar_data_curta(ctx.data_ida), ctx.perna_ida)}
-      {_linha_perna("Volta " + formatar_data_curta(ctx.data_volta), ctx.perna_volta)}
+      {_linha_perna(rot_ida, ctx.perna_ida)}
+      {_linha_perna(rot_volta, ctx.perna_volta)}
       {_linha_comparacoes(ctx)}
       {_linha_ow_comparacao(ctx.comparacao_ow)}
       {_linha_variante(ctx.variante_flexivel)}
+      {_tabela_opcoes_trechos(ctx.opcoes_trechos)}
     </table>
-    <p class="muted">{ctx.origem}&gt;{ctx.destino} · gerado {datetime.now(FUSO_EXIBICAO).strftime('%d/%m %H:%M')} (America/Fortaleza)</p>
+    <p class="muted">{_rotulo(ctx).replace(">", "&gt;")} · gerado {datetime.now(FUSO_EXIBICAO).strftime('%d/%m %H:%M')} (America/Fortaleza)</p>
     """
 
 
@@ -210,7 +248,7 @@ def render_rotina(ctx: RodadaContext) -> tuple[str, str]:
     else:
         meio_assunto = f"{formatar_pct(ctx.pct_mediana)} mediana | n={ctx.n_amostras}"
     assunto = (
-        f"{ctx.origem}>{ctx.destino} {formatar_data_curta(ctx.data_ida)}-{formatar_data_curta(ctx.data_volta)} "
+        f"{_rotulo(ctx)} {formatar_data_curta(ctx.data_ida)}-{formatar_data_curta(ctx.data_volta)} "
         f"| {formatar_reais(ctx.preco_centavos, 0)} | {meio_assunto}"
     )
     html = f"<html><head><style>{_CSS}</style></head><body>{_corpo_tabela(ctx)}</body></html>"
@@ -223,14 +261,14 @@ def render_alerta(ctx: RodadaContext, motivo: Literal["novo_minimo", "queda_sign
     else:
         rotulo = "QUEDA"
     pct_txt = f" ({formatar_pct(ctx.pct_mediana)})" if ctx.pct_mediana is not None else ""
-    assunto = f"{ctx.origem}>{ctx.destino} | {rotulo} {formatar_reais(ctx.preco_centavos, 0)}{pct_txt}"
+    assunto = f"{_rotulo(ctx)} | {rotulo} {formatar_reais(ctx.preco_centavos, 0)}{pct_txt}"
     banner = f'<div class="banner-alerta"><b>{rotulo}</b>: {formatar_reais(ctx.preco_centavos)}{pct_txt}</div>'
     html = f"<html><head><style>{_CSS}</style></head><body>{banner}{_corpo_tabela(ctx)}</body></html>"
     return assunto, html
 
 
 def render_falha(ctx: FalhaContext) -> tuple[str, str]:
-    assunto = f"{ctx.origem}>{ctx.destino} | FALHA na coleta das {ctx.rodada_hora_local}"
+    assunto = f"{_rotulo(ctx)} | FALHA na coleta das {ctx.rodada_hora_local}"
     banner = f'<div class="banner-falha"><b>Falha na coleta</b> — rodada das {ctx.rodada_hora_local}</div>'
     erro_esc = ctx.erro.replace("<", "&lt;").replace(">", "&gt;")
     html = (
